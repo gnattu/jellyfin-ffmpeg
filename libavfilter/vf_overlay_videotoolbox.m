@@ -432,7 +432,7 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
         return AVERROR(EINVAL);
     }
 
-    input_ref = av_buffer_ref(inlink_main->hw_frames_ctx);
+    input_ref = inlink_main->hw_frames_ctx;
     main_frames = (AVHWFramesContext*)input_ref->data;
     av_assert0(main_frames);
 
