@@ -266,6 +266,7 @@ static av_cold void do_uninit(AVFilterContext *avctx) API_AVAILABLE(macos(10.11)
 
     if (ctx->hwframe_ctx_allocated) {
         av_buffer_unref(&ctx->device_ref);
+        ctx->hwframe_ctx_allocated = 0;
     }
     ff_framesync_uninit(&ctx->fs);
 
