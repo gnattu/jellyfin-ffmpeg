@@ -108,7 +108,7 @@ static int transfer_pixel_buffer(OverlayVideoToolboxContext *ctx, CVPixelBufferR
 {
     if (@available(macOS 10.8, iOS 16.0, *)) {
         int ret = 0;
-        ret = VTPixelTransferSessionTransferImage(ctx->vt_session, source , destination);
+        ret = VTPixelTransferSessionTransferImage(ctx->vt_session, source, destination);
         if (ret < 0)
             return ret;
     } else {
@@ -184,7 +184,7 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
         overlay_planes = FFMAX(overlay_planes,
                                in_overlay_desc->comp[i].plane + 1);
 
-    // We need to convert input overlay when it is planer or the color depth does not match
+    // We need to convert input overlay when it is planar or the color depth does not match
     if (overlay_planes > 1 || in_main_desc->comp[0].depth != in_overlay_desc->comp[0].depth) {
         if (!ctx->input_overlay_pixel_buffer_cache) {
             ret = CVPixelBufferCreate(kCFAllocatorDefault,
