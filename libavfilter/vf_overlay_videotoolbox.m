@@ -137,23 +137,21 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
     CVMetalTextureRef main, dst, overlay;
     id<MTLTexture> tex_main, tex_overlay, tex_dst;
 
-    MTLPixelFormat mtl_format = MTLPixelFormatBGRA8Unorm;
-    OSType cv_format = kCVPixelFormatType_32BGRA;
+    MTLPixelFormat mtl_format;
+    OSType cv_format;
     int ret;
     int i, overlay_planes = 0;
 
     in_main_desc = av_pix_fmt_desc_get(frames_ctx->sw_format);
     in_overlay_desc = av_pix_fmt_desc_get(frames_ctx_overlay->sw_format);
-    if (in_main_desc->comp[0].depth >= 10) {
-        if (@available(macOS 11.3, iOS 14.2, *)) {
-            mtl_format = MTLPixelFormatRGBA16Unorm;
-            cv_format = kCVPixelFormatType_64RGBALE;
-        } else {
-            // On older OS versions, 64-bit RGBA with 16-bit little-endian full-range samples is not supported.
-            // To handle inputs with color depth greater than 8, convert colors to float type during filtering on these versions.
-            mtl_format = MTLPixelFormatRGBA16Float;
-            cv_format = kCVPixelFormatType_64RGBAHalf;
-        }
+    if (@available(macOS 11.3, iOS 14.2, *)) {
+        mtl_format = MTLPixelFormatRGBA16Unorm;
+        cv_format = kCVPixelFormatType_64RGBALE;
+    } else {
+        // On older OS versions, 64-bit RGBA with 16-bit little-endian full-range samples is not supported.
+        // To handle inputs with color depth greater than 8, convert colors to float type during filtering on these versions.
+        mtl_format = MTLPixelFormatRGBA16Float;
+        cv_format = kCVPixelFormatType_64RGBAHalf;
     }
 
     // read main and overlay frames from inputs
