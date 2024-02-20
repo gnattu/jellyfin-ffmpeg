@@ -56,6 +56,7 @@ typedef struct API_AVAILABLE(macos(10.11), ios(9.0)) OverlayVideoToolboxContext 
 
     uint x_position;
     uint y_position;
+    uint hwframe_ctx_allocated;
 } OverlayVideoToolboxContext API_AVAILABLE(macos(10.11), ios(9.0));
 
 struct mtlBlendParams {
@@ -66,7 +67,7 @@ struct mtlBlendParams {
 // Using sizeof(OverlayVideoToolboxContext) without an availability check will error
 // if we're targeting an older OS version, so we need to calculate the size ourselves
 // (we'll statically verify it's correct in overlay_videotoolbox_init behind a check)
-#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 2 + sizeof(void*) * 13)
+#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 3 + sizeof(void*) * 13 + 4)
 
 static void call_kernel(AVFilterContext *avctx,
                         id<MTLTexture> dst,
@@ -263,10 +264,12 @@ static av_cold void do_uninit(AVFilterContext *avctx) API_AVAILABLE(macos(10.11)
 {
     OverlayVideoToolboxContext *ctx = avctx->priv;
 
+    if (ctx->hwframe_ctx_allocated) {
+        av_buffer_unref(&ctx->device_ref);
+    }
     ff_framesync_uninit(&ctx->fs);
-    av_buffer_unref(&ctx->device_ref);
 
-    if(ctx->ci_ctx) {
+    if (ctx->ci_ctx) {
         CFRelease(ctx->ci_ctx);
         ctx->ci_ctx = NULL;
     }
@@ -445,6 +448,7 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
         ret = AVERROR(ENOMEM);
         return ret;
     }
+    ctx->hwframe_ctx_allocated = 1;
 
     output_frames = (AVHWFramesContext*)link->hw_frames_ctx->data;
 
@@ -493,7 +497,6 @@ static int overlay_videotoolbox_activate(AVFilterContext *avctx)
 }
 
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
-#define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, INT_MIN, INT_MAX, FLAGS, unit }
 #define OFFSET(x) offsetof(OverlayVideoToolboxContext, x)
 
 static const AVOption overlay_videotoolbox_options[] = {
