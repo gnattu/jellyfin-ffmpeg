@@ -39,23 +39,23 @@ extern unsigned int ff_vf_overlay_videotoolbox_metallib_len;
 typedef struct API_AVAILABLE(macos(10.11), ios(9.0)) OverlayVideoToolboxContext {
     AVBufferRef *device_ref;
     FFFrameSync fs;
-    CVMetalTextureCacheRef textureCache;
-    CVPixelBufferRef inputMainPixelBufferCache;
-    CVPixelBufferRef outputPixelBufferCache;
-    CVPixelBufferRef inputOverlayPixelBufferCache;
-    CIContext *coreImageCtx;
-    VTPixelTransferSessionRef vtSession;
 
-    id<MTLDevice> mtlDevice;
-    id<MTLLibrary> mtlLibrary;
-    id<MTLCommandQueue> mtlQueue;
-    id<MTLComputePipelineState> mtlPipeline;
-    id<MTLFunction> mtlFunction;
-    id<MTLBuffer> mtlParamsBuffer;
+    CVMetalTextureCacheRef texture_cache;
+    CVPixelBufferRef input_main_pixel_buffer_cache;
+    CVPixelBufferRef input_overlay_pixel_buffer_cache;
+    CVPixelBufferRef output_pixel_buffer_cache;
+    CIContext *ci_ctx;
+    VTPixelTransferSessionRef vt_session;
+
+    id<MTLDevice> mtl_device;
+    id<MTLLibrary> mtl_library;
+    id<MTLCommandQueue> mtl_queue;
+    id<MTLComputePipelineState> mtl_pipeline;
+    id<MTLFunction> mtl_function;
+    id<MTLBuffer> mtl_paramsBuffer;
 
     uint x_position;
     uint y_position;
-
 } OverlayVideoToolboxContext API_AVAILABLE(macos(10.11), ios(9.0));
 
 struct mtlBlendParams {
@@ -78,10 +78,10 @@ static void call_kernel(AVFilterContext *avctx,
     OverlayVideoToolboxContext *ctx = avctx->priv;
     // Both the command buffer and encoder are auto-released by objc on default.
     // Use CFBridgingRetain to get a more C-like behavior.
-    id<MTLCommandBuffer> buffer = CFBridgingRetain(ctx->mtlQueue.commandBuffer);
+    id<MTLCommandBuffer> buffer = CFBridgingRetain(ctx->mtl_queue.commandBuffer);
     id<MTLComputeCommandEncoder> encoder = CFBridgingRetain((__bridge id<MTLCommandBuffer>)buffer.computeCommandEncoder);
 
-    struct mtlBlendParams *params = (struct mtlBlendParams *)ctx->mtlParamsBuffer.contents;
+    struct mtlBlendParams *params = (struct mtlBlendParams *)ctx->mtl_paramsBuffer.contents;
     *params = (struct mtlBlendParams){
         .x_position = x_position,
         .y_position = y_position,
@@ -90,8 +90,8 @@ static void call_kernel(AVFilterContext *avctx,
     [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture:main atIndex:0];
     [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture:overlay atIndex:1];
     [(__bridge id<MTLComputeCommandEncoder>)encoder setTexture:dst atIndex:2];
-    [(__bridge id<MTLComputeCommandEncoder>)encoder setBuffer:ctx->mtlParamsBuffer offset:0 atIndex:3];
-    ff_metal_compute_encoder_dispatch(ctx->mtlDevice, ctx->mtlPipeline, (__bridge id<MTLComputeCommandEncoder>)encoder, dst.width, dst.height);
+    [(__bridge id<MTLComputeCommandEncoder>)encoder setBuffer:ctx->mtl_paramsBuffer offset:0 atIndex:3];
+    ff_metal_compute_encoder_dispatch(ctx->mtl_device, ctx->mtl_pipeline, (__bridge id<MTLComputeCommandEncoder>)encoder, dst.width, dst.height);
     [(__bridge id<MTLComputeCommandEncoder>)encoder endEncoding];
 
     [(__bridge id<MTLCommandBuffer>)buffer commit];
@@ -103,16 +103,17 @@ static void call_kernel(AVFilterContext *avctx,
 
 // Copies and/or converts one pixel buffer to another.
 // This transparently handles pixel format and color spaces, and will do a conversion if needed.
-static int transfer_pixel_buffer(OverlayVideoToolboxContext *ctx, CVPixelBufferRef source, CVPixelBufferRef destination) {
+static int transfer_pixel_buffer(OverlayVideoToolboxContext *ctx, CVPixelBufferRef source, CVPixelBufferRef destination)
+{
     if (@available(macOS 10.8, iOS 16.0, *)) {
         int ret = 0;
-        ret = VTPixelTransferSessionTransferImage(ctx->vtSession,source ,destination);
+        ret = VTPixelTransferSessionTransferImage(ctx->vt_session, source , destination);
         if (ret < 0)
             return ret;
     } else {
         CIImage *temp_image = NULL;
         temp_image = CFBridgingRetain([CIImage imageWithCVPixelBuffer: source]);
-        [(__bridge CIContext*)ctx->coreImageCtx render: (__bridge CIImage*)temp_image toCVPixelBuffer: destination];
+        [(__bridge CIContext*)ctx->ci_ctx render: (__bridge CIImage*)temp_image toCVPixelBuffer: destination];
         CFRelease(temp_image);
         CVBufferPropagateAttachments(source, destination);
     }
@@ -186,7 +187,7 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
 
     // We need to convert input overlay when it is planer or the color depth does not match
     if (overlay_planes > 1 || in_main_desc->comp[0].depth != in_overlay_desc->comp[0].depth) {
-        if (!ctx->inputOverlayPixelBufferCache) {
+        if (!ctx->input_overlay_pixel_buffer_cache) {
             ret = CVPixelBufferCreate(kCFAllocatorDefault,
                                       CVPixelBufferGetWidthOfPlane((CVPixelBufferRef)input_overlay->data[3], 0),
                                       CVPixelBufferGetHeightOfPlane((CVPixelBufferRef)input_overlay->data[3], 0),
@@ -195,19 +196,19 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
                                           (NSString *)kCVPixelBufferCGImageCompatibilityKey: @(YES),
                                           (NSString *)kCVPixelBufferMetalCompatibilityKey: @(YES)
                                       },
-                                      &ctx->inputOverlayPixelBufferCache);
+                                      &ctx->input_overlay_pixel_buffer_cache);
             if (ret < 0)
                 return ret;
         }
-        ret = transfer_pixel_buffer(ctx, (CVPixelBufferRef)input_overlay->data[3], ctx->inputOverlayPixelBufferCache);
+        ret = transfer_pixel_buffer(ctx, (CVPixelBufferRef)input_overlay->data[3], ctx->input_overlay_pixel_buffer_cache);
         if (ret < 0)
             return ret;
-        overlay = ff_metal_texture_from_pixbuf(avctx, ctx->textureCache, ctx->inputOverlayPixelBufferCache, 0, mtl_format);
+        overlay = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, ctx->input_overlay_pixel_buffer_cache, 0, mtl_format);
     } else {
-        overlay = ff_metal_texture_from_pixbuf(avctx, ctx->textureCache, (CVPixelBufferRef)input_overlay->data[3], 0, mtl_format);
+        overlay = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, (CVPixelBufferRef)input_overlay->data[3], 0, mtl_format);
     }
 
-    if (!ctx->inputMainPixelBufferCache) {
+    if (!ctx->input_main_pixel_buffer_cache) {
         ret = CVPixelBufferCreate(kCFAllocatorDefault,
                                   CVPixelBufferGetWidthOfPlane((CVPixelBufferRef)input_main->data[3], 0),
                                   CVPixelBufferGetHeightOfPlane((CVPixelBufferRef)input_main->data[3], 0),
@@ -216,11 +217,11 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
                                       (NSString *)kCVPixelBufferCGImageCompatibilityKey: @(YES),
                                       (NSString *)kCVPixelBufferMetalCompatibilityKey: @(YES)
                                   },
-                                  &ctx->inputMainPixelBufferCache);
+                                  &ctx->input_main_pixel_buffer_cache);
         if (ret < 0)
             return ret;
     }
-    if (!ctx->outputPixelBufferCache) {
+    if (!ctx->output_pixel_buffer_cache) {
         ret = CVPixelBufferCreate(kCFAllocatorDefault,
                                   CVPixelBufferGetWidthOfPlane((CVPixelBufferRef)input_main->data[3], 0),
                                   CVPixelBufferGetHeightOfPlane((CVPixelBufferRef)input_main->data[3], 0),
@@ -229,17 +230,17 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
                                       (NSString *)kCVPixelBufferCGImageCompatibilityKey: @(YES),
                                       (NSString *)kCVPixelBufferMetalCompatibilityKey: @(YES)
                                   },
-                                  &ctx->outputPixelBufferCache);
+                                  &ctx->output_pixel_buffer_cache);
         if (ret < 0)
             return ret;
     }
 
-    ret = transfer_pixel_buffer(ctx, (CVPixelBufferRef)input_main->data[3], ctx->inputMainPixelBufferCache);
+    ret = transfer_pixel_buffer(ctx, (CVPixelBufferRef)input_main->data[3], ctx->input_main_pixel_buffer_cache);
     if (ret < 0)
         return ret;
-
-    main = ff_metal_texture_from_pixbuf(avctx, ctx->textureCache, ctx->inputMainPixelBufferCache, 0, mtl_format);
-    dst = ff_metal_texture_from_pixbuf(avctx, ctx->textureCache, ctx->outputPixelBufferCache, 0, mtl_format);
+  
+    main = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, ctx->input_main_pixel_buffer_cache, 0, mtl_format);
+    dst = ff_metal_texture_from_pixbuf(avctx, ctx->texture_cache, ctx->output_pixel_buffer_cache, 0, mtl_format);
 
     tex_main = CVMetalTextureGetTexture(main);
     tex_overlay  = CVMetalTextureGetTexture(overlay);
@@ -247,7 +248,7 @@ static int overlay_vt_blend(FFFrameSync *fs) API_AVAILABLE(macos(10.11), ios(9.0
 
     call_kernel(avctx, tex_dst, tex_main, tex_overlay, ctx->x_position, ctx->y_position);
 
-    ret = transfer_pixel_buffer(ctx, ctx->outputPixelBufferCache, (CVPixelBufferRef)output->data[3]);
+    ret = transfer_pixel_buffer(ctx, ctx->output_pixel_buffer_cache, (CVPixelBufferRef)output->data[3]);
     if (ret < 0)
         return ret;
 
@@ -265,38 +266,38 @@ static av_cold void do_uninit(AVFilterContext *avctx) API_AVAILABLE(macos(10.11)
     ff_framesync_uninit(&ctx->fs);
     av_buffer_unref(&ctx->device_ref);
 
-    if (ctx->coreImageCtx) {
-        CFRelease(ctx->coreImageCtx);
-        ctx->coreImageCtx = NULL;
+    if(ctx->ci_ctx) {
+        CFRelease(ctx->ci_ctx);
+        ctx->ci_ctx = NULL;
     }
 
-    ff_objc_release(&ctx->mtlParamsBuffer);
-    ff_objc_release(&ctx->mtlFunction);
-    ff_objc_release(&ctx->mtlPipeline);
-    ff_objc_release(&ctx->mtlQueue);
-    ff_objc_release(&ctx->mtlLibrary);
-    ff_objc_release(&ctx->mtlDevice);
+    ff_objc_release(&ctx->mtl_paramsBuffer);
+    ff_objc_release(&ctx->mtl_function);
+    ff_objc_release(&ctx->mtl_pipeline);
+    ff_objc_release(&ctx->mtl_queue);
+    ff_objc_release(&ctx->mtl_library);
+    ff_objc_release(&ctx->mtl_device);
 
-    if (ctx->textureCache) {
-        CFRelease(ctx->textureCache);
-        ctx->textureCache = NULL;
+    if (ctx->texture_cache) {
+        CFRelease(ctx->texture_cache);
+        ctx->texture_cache = NULL;
     }
-    if (ctx->inputMainPixelBufferCache) {
-        CFRelease(ctx->inputMainPixelBufferCache);
-        ctx->inputMainPixelBufferCache = NULL;
+    if (ctx->input_main_pixel_buffer_cache) {
+        CFRelease(ctx->input_main_pixel_buffer_cache);
+        ctx->input_main_pixel_buffer_cache = NULL;
     }
-    if (ctx->inputOverlayPixelBufferCache) {
-        CFRelease(ctx->inputOverlayPixelBufferCache);
-        ctx->inputOverlayPixelBufferCache = NULL;
+    if (ctx->input_overlay_pixel_buffer_cache) {
+        CFRelease(ctx->input_overlay_pixel_buffer_cache);
+        ctx->input_overlay_pixel_buffer_cache = NULL;
     }
-    if (ctx->outputPixelBufferCache) {
-        CFRelease(ctx->outputPixelBufferCache);
-        ctx->outputPixelBufferCache = NULL;
+    if (ctx->output_pixel_buffer_cache) {
+        CFRelease(ctx->output_pixel_buffer_cache);
+        ctx->output_pixel_buffer_cache = NULL;
     }
-    if (ctx->vtSession) {
-        VTPixelTransferSessionInvalidate(ctx->vtSession);
-        CFRelease(ctx->vtSession);
-        ctx->vtSession = NULL;
+    if (ctx->vt_session) {
+        VTPixelTransferSessionInvalidate(ctx->vt_session);
+        CFRelease(ctx->vt_session);
+        ctx->vt_session = NULL;
     }
 }
 
@@ -314,13 +315,13 @@ static av_cold int do_init(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), i
     CVReturn ret;
     dispatch_data_t libData;
 
-    ctx->mtlDevice = MTLCreateSystemDefaultDevice();
-    if (!ctx->mtlDevice) {
+    ctx->mtl_device = MTLCreateSystemDefaultDevice();
+    if (!ctx->mtl_device) {
         av_log(avctx, AV_LOG_ERROR, "Unable to find Metal device\n");
         goto fail;
     }
 
-    av_log(ctx, AV_LOG_INFO, "Using Metal device: %s\n", ctx->mtlDevice.name.UTF8String);
+    av_log(ctx, AV_LOG_INFO, "Using Metal device: %s\n", ctx->mtl_device.name.UTF8String);
 
     libData = dispatch_data_create(
         ff_vf_overlay_videotoolbox_metallib_data,
@@ -328,33 +329,33 @@ static av_cold int do_init(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), i
         nil,
         nil);
 
-    ctx->mtlLibrary = [ctx->mtlDevice newLibraryWithData:libData error:&err];
+    ctx->mtl_library = [ctx->mtl_device newLibraryWithData:libData error:&err];
     dispatch_release(libData);
     libData = nil;
-    ctx->mtlFunction = [ctx->mtlLibrary newFunctionWithName:@"blend_shader"];
-    if (!ctx->mtlFunction) {
+    ctx->mtl_function = [ctx->mtl_library newFunctionWithName:@"blend_shader"];
+    if (!ctx->mtl_function) {
         av_log(avctx, AV_LOG_ERROR, "Failed to create Metal function!\n");
         goto fail;
     }
 
-    ctx->mtlQueue = ctx->mtlDevice.newCommandQueue;
-    if (!ctx->mtlQueue) {
+    ctx->mtl_queue = ctx->mtl_device.newCommandQueue;
+    if (!ctx->mtl_queue) {
         av_log(avctx, AV_LOG_ERROR, "Failed to create Metal command queue!\n");
         goto fail;
     }
 
-    ctx->mtlPipeline = [ctx->mtlDevice
-        newComputePipelineStateWithFunction:ctx->mtlFunction
+    ctx->mtl_pipeline = [ctx->mtl_device
+        newComputePipelineStateWithFunction:ctx->mtl_function
         error:&err];
     if (err) {
         av_log(ctx, AV_LOG_ERROR, "Failed to create Metal compute pipeline: %s\n", err.description.UTF8String);
         goto fail;
     }
 
-    ctx->mtlParamsBuffer = [ctx->mtlDevice
+    ctx->mtl_paramsBuffer = [ctx->mtl_device
         newBufferWithLength:sizeof(struct mtlBlendParams)
         options:MTLResourceStorageModeShared];
-    if (!ctx->mtlParamsBuffer) {
+    if (!ctx->mtl_paramsBuffer) {
         av_log(avctx, AV_LOG_ERROR, "Failed to create Metal buffer for parameters\n");
         goto fail;
     }
@@ -362,9 +363,9 @@ static av_cold int do_init(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), i
     ret = CVMetalTextureCacheCreate(
         NULL,
         NULL,
-        ctx->mtlDevice,
+        ctx->mtl_device,
         NULL,
-        &ctx->textureCache
+        &ctx->texture_cache
     );
     if (ret != kCVReturnSuccess) {
         av_log(avctx, AV_LOG_ERROR, "Failed to create CVMetalTextureCache: %d\n", ret);
@@ -372,7 +373,7 @@ static av_cold int do_init(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), i
     }
 
     if (@available(macOS 10.8, iOS 16.0, *)) {
-        ret = VTPixelTransferSessionCreate(NULL, &ctx->vtSession);
+        ret = VTPixelTransferSessionCreate(NULL, &ctx->vt_session);
         if (ret != kCVReturnSuccess) {
             av_log(avctx, AV_LOG_ERROR, "Failed to create VTPixelTransferSession: %d\n", ret);
             goto fail;
@@ -384,9 +385,9 @@ static av_cold int do_init(AVFilterContext *avctx) API_AVAILABLE(macos(10.11), i
         av_log(avctx, AV_LOG_WARNING, "VTPixelTransferSessionTransferImage is not available on this OS version, fallback using CoreImage\n");
         av_log(avctx, AV_LOG_WARNING, "Try an overlay with BGRA format if you see no overlay\n");
         if (@available(macOS 10.15, iOS 13.0, *)) {
-            ctx->coreImageCtx = CFBridgingRetain([CIContext contextWithMTLCommandQueue: ctx->mtlQueue]);
+            ctx->ci_ctx = CFBridgingRetain([CIContext contextWithMTLCommandQueue: ctx->mtl_queue]);
         } else {
-            ctx->coreImageCtx = CFBridgingRetain([CIContext contextWithMTLDevice: ctx->mtlDevice]);
+            ctx->ci_ctx = CFBridgingRetain([CIContext contextWithMTLDevice: ctx->mtl_device]);
         }
     }
 
@@ -485,7 +486,8 @@ static int config_output(AVFilterLink *link)
     }
 }
 
-static int overlay_videotoolbox_activate(AVFilterContext *avctx) {
+static int overlay_videotoolbox_activate(AVFilterContext *avctx)
+{
     OverlayVideoToolboxContext *ctx = avctx->priv;
     return ff_framesync_activate(&ctx->fs);
 }
