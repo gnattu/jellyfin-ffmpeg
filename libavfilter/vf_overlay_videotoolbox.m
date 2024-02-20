@@ -37,7 +37,6 @@ extern unsigned int ff_vf_overlay_videotoolbox_metallib_len;
 // Although iOS 8.0 introduced basic Metal support, its feature set is not complete and does not have CoreImage compatability.
 // We have to set the minimum iOS version to 9.0.
 typedef struct API_AVAILABLE(macos(10.11), ios(9.0)) OverlayVideoToolboxContext {
-    AVBufferRef *device_ref;
     FFFrameSync fs;
 
     CVMetalTextureCacheRef texture_cache;
@@ -56,7 +55,6 @@ typedef struct API_AVAILABLE(macos(10.11), ios(9.0)) OverlayVideoToolboxContext 
 
     uint x_position;
     uint y_position;
-    uint hwframe_ctx_allocated;
 } OverlayVideoToolboxContext API_AVAILABLE(macos(10.11), ios(9.0));
 
 struct mtlBlendParams {
@@ -67,7 +65,7 @@ struct mtlBlendParams {
 // Using sizeof(OverlayVideoToolboxContext) without an availability check will error
 // if we're targeting an older OS version, so we need to calculate the size ourselves
 // (we'll statically verify it's correct in overlay_videotoolbox_init behind a check)
-#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 3 + sizeof(void*) * 13 + 4)
+#define OVERLAY_VT_CTX_SIZE (sizeof(FFFrameSync) + sizeof(uint) * 2 + sizeof(void*) * 12)
 
 static void call_kernel(AVFilterContext *avctx,
                         id<MTLTexture> dst,
@@ -264,10 +262,6 @@ static av_cold void do_uninit(AVFilterContext *avctx) API_AVAILABLE(macos(10.11)
 {
     OverlayVideoToolboxContext *ctx = avctx->priv;
 
-    if (ctx->hwframe_ctx_allocated) {
-        av_buffer_unref(&ctx->device_ref);
-        ctx->hwframe_ctx_allocated = 0;
-    }
     ff_framesync_uninit(&ctx->fs);
 
     if (ctx->ci_ctx) {
@@ -422,7 +416,7 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
     AVFilterLink *inlink_overlay = avctx->inputs[1];
     OverlayVideoToolboxContext *ctx = avctx->priv;
     AVHWFramesContext *main_frames, *output_frames;
-    AVBufferRef *input_ref;
+    AVBufferRef *input_ref, *device_ref;
     int ret = 0;
 
     if (!inlink_main->hw_frames_ctx ||
@@ -436,20 +430,19 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
     main_frames = (AVHWFramesContext*)input_ref->data;
     av_assert0(main_frames);
 
-    ctx->device_ref = av_buffer_ref(main_frames->device_ref);
-    if (!ctx->device_ref) {
+    device_ref = av_buffer_ref(main_frames->device_ref);
+    if (!device_ref) {
         av_log(ctx, AV_LOG_ERROR, "A device reference create failed.\n");
         return AVERROR(ENOMEM);
     }
 
-    link->hw_frames_ctx = av_hwframe_ctx_alloc(ctx->device_ref);
+    link->hw_frames_ctx = av_hwframe_ctx_alloc(device_ref);
     if (!link->hw_frames_ctx) {
         av_log(avctx, AV_LOG_ERROR, "Failed to create HW frame context "
                "for output.\n");
         ret = AVERROR(ENOMEM);
         return ret;
     }
-    ctx->hwframe_ctx_allocated = 1;
 
     output_frames = (AVHWFramesContext*)link->hw_frames_ctx->data;
 
